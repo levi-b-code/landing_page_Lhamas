@@ -1,0 +1,1 @@
+Coloque seus arquivos de som nesta pasta. Formatos sugeridos: .mp3, .wav, .ogg

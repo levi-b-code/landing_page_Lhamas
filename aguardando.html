@@ -1,0 +1,1159 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Lhama Runner — Office Edition</title>
+<style>
+  :root {
+    --bg: #f5f7fb;         /* base dia dentro do escritório */
+    --fg: #1e293b;
+    --muted: #64748b;
+    --accent: #10b981;
+    --danger: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    background: var(--bg);
+    color: var(--fg);
+    display: grid;
+    place-items: center;
+    min-height: 100dvh;
+  }
+  .wrap { width: min(980px, 96vw); padding: 16px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  h1 { font-size: 1.1rem; margin: 0; font-weight: 700; letter-spacing: 0.3px; }
+  .hint { color: var(--muted); font-size: 0.9rem; }
+  .panel { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  canvas {
+    display: block; width: 100%; height: auto; max-height: 70vh;
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.08), inset 0 0 0 1px rgba(0,0,0,0.06);
+    background: #e9eef5; /* interior do escritório */
+  }
+  .stats {
+    display: flex; gap: 16px; align-items: center; justify-content: flex-end;
+    font-variant-numeric: tabular-nums;
+  }
+  .kbd {
+    padding: 2px 6px; border: 1px solid rgba(0,0,0,.15); border-bottom-width: 2px;
+    border-radius: 6px; background: #fff; color: #111; font-weight: 700; font-size: .9rem;
+  }
+  .btn { cursor: pointer; border: none; border-radius: 10px; padding: 8px 12px; background: #111; color: #fff; font-weight: 700; }
+  .btn:active { transform: translateY(1px); }
+  .ghost { opacity: .65; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🦙 Lhama Runner — Office Edition <span style="font-weight:400;color:#64748b"></span></h1>
+      <div class="stats">
+        <span class="hint">Controles:</span>
+        <span class="kbd">Espaço</span>
+        <span class="kbd">↑</span>
+        <span class="kbd">↓</span>
+      </div>
+    </header>
+    <div class="panel">
+      <button id="btn-restart" class="btn" title="Reiniciar (Espaço)">Reiniciar</button>
+      <span class="hint ghost">Toque/tap (mobile) para pular • Segure ↓ para abaixar • P = Pausar</span>
+      <!-- removido qualquer label de modo -->
+    </div>
+    <canvas id="game" width="960" height="360" aria-label="Lhama Runner — Office Edition"></canvas>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  // Fallback para ctx.roundRect (navegadores antigos)
+  if (!CanvasRenderingContext2D.prototype.roundRect) {
+    CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, r) {
+      const rr = Math.min(r, w/2, h/2);
+      this.beginPath();
+      this.moveTo(x + rr, y);
+      this.arcTo(x + w, y, x + w, y + h, rr);
+      this.arcTo(x + w, y + h, x, y + h, rr);
+      this.arcTo(x, y + h, x, y, rr);
+      this.arcTo(x, y, x + w, y, rr);
+      this.closePath();
+      return this;
+    }
+  }
+
+  // --- Dimensões do mundo
+  const W = canvas.width;
+  const H = canvas.height;
+  const FLOOR_H = 56;              // altura do piso (interior)
+  const FLOOR_Y = H - FLOOR_H;     // y do piso / linha de "chão"
+
+  // --- Estado global
+  let lastTime = 0;
+  let running = true;
+  let gameOver = false;
+  let score = 0;                                // pontua por obstáculo passado
+  let hiScore = Number(localStorage.getItem('llamaRunnerHiScore') || 0);
+  let speed = 7.5;
+  const BASE_SPEED = 7.5;
+  const MAX_SPEED = 15.5;
+  const ACCEL = 0.00045;                        // aceleração por ms
+  let spawnTimer = 0;
+  let spawnInterval = 1200;                     // ms (ajustável)
+
+  // ===== Exterior: alternância Dia/Noite e "raramente" Chuva =====
+  // Modos possíveis: 'day' | 'night' | 'rain'
+  let exteriorMode = 'day';
+  let lastDN = 'night';            // último estado não-chuva para alternar
+  let modeTimer = 0;
+  let modeDuration = pickDuration(exteriorMode);
+  let prevExteriorMode = exteriorMode;
+
+  function pickDuration(mode) {
+    if (mode === 'rain') return 8000 + Math.random()*6000;        // 8–14s
+    return 20000 + Math.random()*15000;                            // 20–35s
+  }
+  function nextExteriorMode() {
+    // 10% de chance de chuva; senão alterna entre dia <-> noite
+    if (Math.random() < 0.10) return 'rain';
+    lastDN = (lastDN === 'day') ? 'night' : 'day';
+    return lastDN;
+  }
+
+  // Chuvas (streaks no "céu")
+  const rainStreaks = []; // {x, y, len, speed, drift}
+  const GLASS_STREAKS = []; // streaks no vidro (overlay)
+
+  function seedRain() {
+    rainStreaks.length = 0;
+    GLASS_STREAKS.length = 0;
+    const count = 140; // intensidade
+    for (let i=0; i<count; i++){
+      rainStreaks.push({
+        x: Math.random()*W,
+        y: Math.random()*(FLOOR_Y-10),
+        len: 10 + Math.random()*18,
+        speed: 2.0 + Math.random()*2.5,
+        drift: 0.6 + Math.random()*0.5
+      });
+    }
+    // Streaks no vidro (menos, mais suaves)
+    for (let i=0; i<30; i++){
+      GLASS_STREAKS.push({
+        x: Math.random()*W,
+        y: Math.random()*(FLOOR_Y-20),
+        len: 14 + Math.random()*22,
+        speed: 0.8 + Math.random()*1.2
+      });
+    }
+  }
+
+  // Efeitos de popup de pontos
+  const popups = []; // {x,y,text,life}
+
+  // Lhama (pelagem clara/bege)
+  const llama = {
+    x: 70,
+    y: FLOOR_Y - 50,
+    w: 46,
+    h: 50,
+    vy: 0,
+    onGround: true,
+    duck: false,
+    legPhase: 0,
+    alive: true,
+  };
+
+  // Obstáculos
+  const obstacles = []; // { type, x, y, w, h, scored?, value, floatPhase? }
+
+  // Catálogo de obstáculos (dimensões aproximadas)
+  const GROUND_OBS = [
+    { type: 'desk',        w: 92, h: 44 },
+    { type: 'chair',       w: 40, h: 40 },
+    { type: 'switch',      w: 66, h: 22 },
+    { type: 'server',      w: 34, h: 64 },
+    { type: 'toilet',      w: 42, h: 48 },
+    { type: 'watercooler', w: 34, h: 62 },
+    { type: 'secretary',   w: 38, h: 58 }
+  ];
+  const AIR_OBS = [
+    { type: 'keyboard',  w: 64, h: 18 },
+    { type: 'monitor',   w: 56, h: 36 },
+    { type: 'coffee',    w: 28, h: 30 },
+    { type: 'chocolate', w: 42, h: 22 },
+    { type: 'candy',     w: 28, h: 24 },
+    { type: 'agenda',    w: 44, h: 30 },
+    { type: 'call',      w: 36, h: 24 },
+    { type: 'email',     w: 40, h: 26 },
+    { type: 'badge',     w: 40, h: 34 },
+    { type: 'workcard',  w: 38, h: 30 }
+  ];
+
+  // Nuvens/estrelas (fora da janela — “exterior”)
+  const clouds = [];
+  const stars = [];
+  seedClouds();
+  seedStars();
+
+  function seedClouds() {
+    for (let i=0; i<6; i++) {
+      clouds.push({
+        x: Math.random()*W, y: 20 + Math.random()*120, w: 40+Math.random()*60,
+        speed: 0.2 + Math.random()*0.4
+      });
+    }
+  }
+  function seedStars() {
+    for (let i=0; i<80; i++) {
+      stars.push({
+        x: Math.random()*W, y: Math.random()*H*0.7, r: Math.random()*1.2+0.4,
+        tw: Math.random()*2*Math.PI
+      });
+    }
+  }
+
+  // Entrada
+  const keys = new Set();
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowUp','ArrowDown',' ','Space','KeyW','KeyS','KeyP'].includes(e.code)) e.preventDefault();
+    keys.add(e.code);
+    if ((e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW')) {
+      if (gameOver) { restart(); return; }
+      jump();
+    }
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') {
+      llama.duck = true;
+    }
+    if (e.code === 'KeyP') {
+      running = !running;
+      if (running && !gameOver) requestAnimationFrame(loop);
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    keys.delete(e.code);
+    if (e.code === 'ArrowDown' || e.code === 'KeyS') llama.duck = false;
+  });
+
+  // Toque/tap
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if (gameOver) { restart(); return; }
+    jump();
+  }, {passive:false});
+
+  document.getElementById('btn-restart')?.addEventListener('click', restart);
+
+  function jump() {
+    if (llama.onGround && llama.alive) {
+      llama.vy = -12.6;
+      llama.onGround = false;
+    }
+  }
+
+  function restart() {
+    gameOver = false;
+    running = true;
+    score = 0;
+    speed = BASE_SPEED;
+    spawnTimer = 0;
+    obstacles.length = 0;
+    popups.length = 0;
+    llama.x = 70;
+    llama.y = FLOOR_Y - 50;
+    llama.vy = 0;
+    llama.onGround = true;
+    llama.duck = false;
+    llama.alive = true;
+
+    exteriorMode = 'day';
+    lastDN = 'night';
+    modeTimer = 0;
+    modeDuration = pickDuration(exteriorMode);
+    prevExteriorMode = exteriorMode;
+    rainStreaks.length = 0;
+    GLASS_STREAKS.length = 0;
+
+    requestAnimationFrame(loop);
+  }
+
+  // Util
+  function clamp(v,min,max){ return Math.max(min, Math.min(max, v)); }
+  function collide(a,b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x &&
+           a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  // Spawner de obstáculos (mistura de chão e ar)
+  function spawnObstacle() {
+    const useAir = Math.random() < clamp(0.25 + score/3000, 0.25, 0.6);
+    if (useAir) {
+      const base = AIR_OBS[Math.floor(Math.random()*AIR_OBS.length)];
+      const w = base.w, h = base.h;
+      const heights = [FLOOR_Y-80, FLOOR_Y-110, FLOOR_Y-140];
+      const y = heights[Math.floor(Math.random()*heights.length)];
+      const value = calcObstacleValue(base.type, w, h);
+      obstacles.push({ type: base.type, x: W+20, y, w, h, scored:false, value, floatPhase: Math.random()*Math.PI*2 });
+    } else {
+      const base = GROUND_OBS[Math.floor(Math.random()*GROUND_OBS.length)];
+      const w = base.w, h = base.h;
+      let groupChance = (base.type === 'switch' || base.type === 'server') ? 0.35 : 0.12;
+      if (['desk','chair','toilet','watercooler','secretary'].includes(base.type)) groupChance = 0.08;
+      const group = Math.random() < groupChance ? (Math.random()<0.5?2:3) : 1;
+
+      let offset = 0;
+      for (let i=0;i<group;i++){
+        const value = calcObstacleValue(base.type, w, h);
+        obstacles.push({ type: base.type, x: W+20+offset, y: FLOOR_Y - h, w, h, scored:false, value });
+        offset += w + 14;
+      }
+    }
+    spawnInterval = clamp(980 - score*0.20, 640, 1100);
+  }
+
+  // Pontuação por tamanho (+ multiplicadores por tipo)
+  function calcObstacleValue(type, w, h) {
+    const base = Math.max(1, Math.round((w * h) / 60));
+    let mult = 1.0;
+    if (type === 'server')      mult = 1.25;
+    if (type === 'monitor')     mult = 1.15;
+    if (type === 'coffee')      mult = 1.10;
+    if (type === 'toilet')      mult = 1.20;
+    if (type === 'watercooler') mult = 1.18;
+    if (type === 'secretary')   mult = 1.22;
+    if (type === 'chocolate')   mult = 1.05;
+    if (type === 'email')       mult = 1.08;
+    if (type === 'agenda')      mult = 1.05;
+    if (type === 'badge')       mult = 1.07;
+    if (type === 'workcard')    mult = 1.10;
+    if (type === 'call')        mult = 1.00;
+    if (type === 'candy')       mult = 1.00;
+    if (type === 'switch')      mult = Math.max(mult, 1.08);
+    if (type === 'desk')        mult = Math.max(mult, 1.10);
+    return Math.max(1, Math.round(base * mult));
+  }
+
+  // Render geral
+  function clear() {
+    // parede do escritório (interior) — SEM variação de noite
+    ctx.fillStyle = '#eef2f8';
+    ctx.fillRect(0,0,W,H);
+  }
+
+  function drawExterior(dt) {
+    // alternância do modo
+    modeTimer += dt;
+    if (modeTimer > modeDuration) {
+      prevExteriorMode = exteriorMode;
+      exteriorMode = nextExteriorMode();
+      modeDuration = pickDuration(exteriorMode);
+      modeTimer = 0;
+      if (exteriorMode === 'rain') seedRain();
+    }
+    if (prevExteriorMode === 'rain' && exteriorMode !== 'rain') {
+      rainStreaks.length = 0;
+      GLASS_STREAKS.length = 0;
+    }
+
+    // céu/estrelas/chuva
+    if (exteriorMode === 'day') {
+      const g = ctx.createLinearGradient(0,0,0,FLOOR_Y-10);
+      g.addColorStop(0, '#bde0ff');
+      g.addColorStop(1, '#e6f2ff');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,W,FLOOR_Y-10);
+
+      // nuvens
+      ctx.fillStyle = '#dde7ef';
+      clouds.forEach(c => {
+        c.x -= c.speed;
+        if (c.x + c.w < 0) { c.x = W + (20 + Math.random()*140); c.y = 20 + Math.random()*120; c.w = 40+Math.random()*60; }
+        drawCloud(c.x, c.y, c.w, false);
+      });
+      drawSkyline(false);
+
+    } else if (exteriorMode === 'night') {
+      const g = ctx.createLinearGradient(0,0,0,FLOOR_Y-10);
+      g.addColorStop(0, '#0b1220');
+      g.addColorStop(1, '#0f1a2e');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,W,FLOOR_Y-10);
+
+      // estrelas
+      stars.forEach(s => {
+        s.tw += 0.02;
+        const a = 0.3 + Math.sin(s.tw)*0.25;
+        ctx.fillStyle = `rgba(255,255,200,${a})`;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+        ctx.fill();
+      });
+      drawSkyline(true);
+
+    } else { // 'rain'
+      const g = ctx.createLinearGradient(0,0,0,FLOOR_Y-10);
+      g.addColorStop(0, '#283549'); // céu escuro-chuvoso
+      g.addColorStop(1, '#1f2a38');
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,W,FLOOR_Y-10);
+
+      // nuvens mais densas
+      ctx.fillStyle = '#8aa0b3';
+      clouds.forEach(c => {
+        const sp= (c.speed*0.5); // mais lentas
+        c.x -= sp;
+        if (c.x + c.w < 0) { c.x = W + (20 + Math.random()*140); c.y = 20 + Math.random()*120; c.w = 40+Math.random()*60; }
+        drawCloud(c.x, c.y, c.w, true);
+      });
+      drawSkyline(true);
+
+      // chuva (streaks diagonais)
+      ctx.strokeStyle = 'rgba(200,220,255,0.6)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (const r of rainStreaks) {
+        ctx.moveTo(r.x, r.y);
+        ctx.lineTo(r.x - r.drift*r.len, r.y + r.len);
+        // atualizar
+        r.x -= r.drift*r.speed;
+        r.y += r.speed*3;
+        if (r.y > FLOOR_Y-10) {
+          r.y = -20; r.x = Math.random()*W;
+        }
+      }
+      ctx.stroke();
+    }
+  }
+
+  function drawSkyline(nightMode){
+    ctx.save();
+    ctx.globalAlpha = nightMode ? 0.3 : 0.12;
+    ctx.fillStyle = nightMode ? '#e5e7eb' : '#111827';
+    const baseY = FLOOR_Y - 20;
+    const rng = [60,80,100,70,90,110,75,65];
+    let x = -40;
+    for (let i=0;i<rng.length*6;i++){
+      const w = 22 + (i%3)*6;
+      const h = rng[i % rng.length];
+      ctx.fillRect(x, baseY - h, w, h);
+      x += w + 16;
+    }
+    ctx.restore();
+  }
+
+  function drawCloud(x,y,w, isNight=false){
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.beginPath();
+    ctx.fillStyle = isNight ? '#566' : '#e5eef3';
+    const r = w/5;
+    ctx.arc(0, 0, r, Math.PI*0.5, Math.PI*1.5);
+    ctx.arc(r*1.2, -r*0.8, r*1.2, Math.PI, Math.PI*2);
+    ctx.arc(r*2.4, -r*0.3, r*1.1, Math.PI, Math.PI*2);
+    ctx.arc(r*3.6, 0, r, Math.PI*1.5, Math.PI*0.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawOfficeInterior() {
+    // piso com "carpete" — SEM variação de noite
+    ctx.fillStyle = '#d7dde6';
+    ctx.fillRect(0, FLOOR_Y, W, FLOOR_H);
+
+    // listras do carpete
+    ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+    ctx.lineWidth = 1;
+    for (let x=0; x<W; x+=24) {
+      ctx.beginPath();
+      ctx.moveTo(x + (performance.now()/50)%24, FLOOR_Y+6);
+      ctx.lineTo(x + (performance.now()/50)%24, H-6);
+      ctx.stroke();
+    }
+
+    // linha do piso (separa chão/parede)
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, FLOOR_Y+0.5);
+    ctx.lineTo(W, FLOOR_Y+0.5);
+    ctx.stroke();
+  }
+
+  function drawWindowOverlay(ms) {
+    // moldura e reflexos SEM depender do interior
+    ctx.save();
+    // molduras principais
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = (exteriorMode === 'day') ? '#94a3b8' : '#6b7280';
+    const frameW = 10;
+    // bordas
+    ctx.fillRect(0, 0, frameW, FLOOR_Y-10);
+    ctx.fillRect(W-frameW, 0, frameW, FLOOR_Y-10);
+    // travessa superior
+    ctx.fillRect(0, 0, W, 14);
+
+    // colunas
+    ctx.globalAlpha = 0.18;
+    const pane = 180; // largura de cada janela
+    for (let x = 120; x < W; x += pane) {
+      ctx.fillRect(x, 0, 8, FLOOR_Y-10);
+    }
+
+    // reflexos diagonais animados (mantidos)
+    ctx.globalAlpha = 0.07;
+    ctx.fillStyle = '#ffffff';
+    const t = (ms || performance.now()) / 1000;
+    const slant = 80;
+    for (let i=0;i<6;i++){
+      const ox = ((t*40) + i*160) % (W+200) - 200;
+      ctx.beginPath();
+      ctx.moveTo(ox, 0);
+      ctx.lineTo(ox+slant, 0);
+      ctx.lineTo(ox+slant-40, FLOOR_Y-20);
+      ctx.lineTo(ox-40, FLOOR_Y-20);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Streaks no vidro quando chove
+    if (exteriorMode === 'rain') {
+      ctx.globalAlpha = 0.15;
+      ctx.strokeStyle = '#cfe6ff';
+      ctx.lineWidth = 1.2;
+      for (const d of GLASS_STREAKS) {
+        ctx.beginPath();
+        ctx.moveTo(d.x, d.y);
+        ctx.lineTo(d.x, d.y + d.len);
+        ctx.stroke();
+        d.y += d.speed;
+        if (d.y > FLOOR_Y-20) {
+          d.y = -10; d.x = Math.random()*W;
+        }
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function drawScore() {
+    ctx.font = 'bold 18px ui-monospace, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#111827';
+    ctx.fillText(score.toString().padStart(5,'0'), W - 16, 26);
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillText('HI ' + hiScore.toString().padStart(5,'0'), W - 16, 48);
+  }
+
+  // ======= DESENHO DOS OBJETOS (CORES FIXAS – interior) =======
+  function drawLlama(x, y, state) {
+    // Paleta bege clara
+    const outline = '#6b5b4b';      // contorno marrom suave
+    const fill    = '#e8d5c4';      // pelagem bege clara
+    const wool    = '#f1ebe4';      // áreas “fofinhas” mais claras
+    const accent  = '#10b981';
+
+    ctx.save();
+    ctx.translate(x, y);
+
+    // sombra
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    ctx.beginPath();
+    ctx.ellipse(18, llama.h + 6, 18, 5, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    const duckFactor = state === 'duck' ? 0.7 : 1;
+    const bodyH = Math.floor(llama.h * 0.65 * duckFactor);
+    const bodyW = Math.floor(llama.w * 0.9);
+
+    // corpo
+    roundRect(0, 10 + (state==='duck'?10:0), bodyW, bodyH, 6, fill, outline);
+
+    // pescoço/cabeça
+    const neckH = state==='duck' ? 10 : 18;
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = outline;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(bodyW-8, 4 + (state==='duck'?12:0), 10, neckH, 3);
+    ctx.fill(); ctx.stroke();
+
+    ctx.beginPath();
+    ctx.roundRect(bodyW, (state==='duck'?6:0), 18, 16, 4);
+    ctx.fill(); ctx.stroke();
+
+    // orelhas
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.roundRect(bodyW+3, (state==='duck'?-4: -6), 4, 8, 2);
+    ctx.roundRect(bodyW+10, (state==='duck'?-5: -7), 4, 9, 2);
+    ctx.fill();
+
+    // rosto
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(bodyW+3, (state==='duck'?9:3), 5, 4);
+    ctx.fillStyle = '#3b3b3b';
+    ctx.fillRect(bodyW+6, (state==='duck'?10:4), 2, 2); // olho
+    ctx.fillStyle = '#34d399';
+    ctx.fillRect(bodyW+13, (state==='duck'?12:6), 3, 3); // focinho/acento
+
+    // lã fofinha
+    ctx.fillStyle = wool;
+    for (let i=0;i<4;i++) {
+      ctx.beginPath();
+      ctx.arc(6 + i*10, 14 + (state==='duck'?8:0), 4, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // pernas
+    const t = llama.legPhase;
+    const legOff = state==='duck' ? 8 : 0;
+    const legA = Math.sin(t)*2, legB = Math.cos(t)*2;
+
+    ctx.fillStyle = fill;
+    ctx.strokeStyle = outline;
+    ctx.lineWidth = 2;
+
+    ctx.beginPath();
+    ctx.roundRect(6 + legA, 10 + bodyH + legOff, 6, 16, 2);
+    ctx.fill(); ctx.stroke();
+
+    ctx.beginPath();
+    ctx.roundRect(20 + legB, 10 + bodyH + legOff, 6, 16, 2);
+    ctx.fill(); ctx.stroke();
+
+    // rabo
+    ctx.fillStyle = wool;
+    ctx.beginPath();
+    ctx.roundRect(-6, 16 + (state==='duck'?6:0), 6, 10, 3);
+    ctx.fill();
+
+    // coleira/acento
+    ctx.fillStyle = accent;
+    ctx.fillRect( bodyW-2, (state==='duck'?14:6), 3, 4);
+
+    ctx.restore();
+  }
+
+  function roundRect(x,y,w,h,r, fillColor, strokeColor){
+    ctx.fillStyle = fillColor;
+    ctx.strokeStyle = strokeColor || 'transparent';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(x,y,w,h,r);
+    ctx.fill();
+    if (strokeColor) ctx.stroke();
+  }
+
+  // --- TERRESTRES (cores fixas) ---
+  function drawDesk(o){
+    ctx.save(); ctx.translate(o.x, o.y);
+    const topH = 10;
+    ctx.fillStyle = '#b07b53';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, topH, 3); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#475569';
+    const legW = 8, legH = o.h - topH;
+    ctx.fillRect(6, topH, legW, legH);
+    ctx.fillRect(o.w-6-legW, topH, legW, legH);
+    ctx.fillStyle = '#334155';
+    ctx.fillRect(o.w*0.55, topH+6, 18, legH-8);
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillRect(o.w*0.18, -10, 22, 10);
+    ctx.fillStyle = '#64748b';
+    ctx.fillRect(o.w*0.18+9, 0, 4, 6);
+    ctx.restore();
+  }
+
+  function drawChair(o){
+    ctx.save(); ctx.translate(o.x, o.y);
+    ctx.fillStyle = '#475569';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(8, o.h-16, 24, 10, 3); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.roundRect(6, o.h-34, 10, 20, 3); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#64748b';
+    ctx.fillRect(16, o.h-6, 12, 4);
+    ctx.beginPath(); ctx.arc(16, o.h-2, 2, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(26, o.h-2, 2, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawSwitch(o){
+    ctx.save(); ctx.translate(o.x, o.y);
+    ctx.fillStyle = '#111827';
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, o.h, 3); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#10b981';
+    for (let x=6; x<o.w-6; x+=10) ctx.fillRect(x, 6, 6, 4);
+    ctx.fillStyle = '#f59e0b';
+    ctx.fillRect(4, o.h-8, 6, 4);
+    ctx.fillStyle = '#ef4444';
+    ctx.fillRect(12, o.h-8, 6, 4);
+    ctx.restore();
+  }
+
+  function drawServer(o){
+    ctx.save(); ctx.translate(o.x, o.y);
+    ctx.fillStyle = '#111827';
+    ctx.strokeStyle = '#334155';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, o.h, 4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#475569';
+    for (let y=6; y<o.h-6; y+=10) ctx.fillRect(4, y, o.w-8, 6);
+    ctx.fillStyle = '#22c55e'; ctx.fillRect(o.w-10, 6, 4, 4);
+    ctx.fillStyle = '#f59e0b'; ctx.fillRect(o.w-10, 12, 4, 4);
+    ctx.restore();
+  }
+
+  function drawToilet(o){
+    ctx.save(); ctx.translate(o.x, o.y);
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.roundRect(4, o.h-16, o.w-8, 14, 6); ctx.fill(); ctx.stroke(); // base
+    ctx.beginPath(); ctx.roundRect(8, o.h-30, o.w-16, 18, 6); ctx.fill(); ctx.stroke(); // vaso
+    ctx.fillStyle = '#60a5fa'; ctx.fillRect(12, o.h-24, o.w-24, 6); // água
+    ctx.fillStyle = '#f8fafc';
+    ctx.beginPath(); ctx.roundRect(o.w-18, o.h-46, 16, 20, 4); ctx.fill(); ctx.stroke(); // tanque
+    ctx.strokeStyle = '#64748b';
+    ctx.beginPath(); ctx.arc(12, o.h-28, 10, -Math.PI/2, Math.PI/2); ctx.stroke(); // tampa
+    ctx.restore();
+  }
+
+  function drawWatercooler(o){
+    ctx.save(); ctx.translate(o.x, o.y);
+    ctx.lineWidth = 2;
+    ctx.fillStyle = '#e5e7eb';
+    ctx.strokeStyle = '#1f2937';
+    ctx.beginPath(); ctx.roundRect(4, 8, o.w-8, o.h-8, 6); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#60a5fa';
+    ctx.beginPath(); ctx.roundRect(6, -8, o.w-12, 20, 6); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillRect(8, 26, o.w-16, 16);
+    ctx.fillStyle = '#3b82f6'; ctx.fillRect(10, 46, 6, 8);
+    ctx.fillStyle = '#ef4444'; ctx.fillRect(o.w-16, 46, 6, 8);
+    ctx.fillStyle = '#94a3b8'; ctx.fillRect(4, o.h-10, o.w-8, 8);
+    ctx.restore();
+  }
+
+  function drawSecretary(o){
+    ctx.save(); ctx.translate(o.x, o.y);
+    const t = performance.now()/600;
+    const wave = Math.sin(t) * 3;
+
+    const skin  = '#f2c6b6';
+    const hair  = '#1f2937';
+    const blazer= '#334155';
+    const blouse= '#ffffff';
+    const skirt = '#111827';
+    const shoes = '#111827';
+
+    // sombra
+    ctx.fillStyle = 'rgba(0,0,0,0.12)';
+    ctx.beginPath(); ctx.ellipse(o.w*0.4, o.h + 6, 18, 5, 0, 0, Math.PI*2); ctx.fill();
+
+    // pernas
+    ctx.fillStyle = skin;
+    ctx.fillRect(10, o.h-20, 6, 18);
+    ctx.fillRect(22, o.h-20, 6, 18);
+
+    // sapatos
+    ctx.fillStyle = shoes;
+    ctx.fillRect(8, o.h-4, 12, 4);
+    ctx.fillRect(22, o.h-4, 12, 4);
+
+    // saia lápis
+    ctx.fillStyle = skirt;
+    ctx.beginPath(); ctx.roundRect(6, o.h-38, 28, 20, 4); ctx.fill();
+
+    // blazer
+    ctx.fillStyle = blazer;
+    ctx.beginPath(); ctx.roundRect(4, o.h-62, 32, 26, 5); ctx.fill();
+
+    // blusa
+    ctx.fillStyle = blouse;
+    ctx.beginPath(); ctx.roundRect(8, o.h-56, 24, 14, 3); ctx.fill();
+
+    // gola
+    ctx.fillStyle = '#cbd5e1';
+    ctx.fillRect(12, o.h-56, 6, 3);
+    ctx.fillRect(22, o.h-56, 6, 3);
+
+    // cabeça
+    ctx.fillStyle = skin;
+    ctx.beginPath(); ctx.roundRect(10, o.h-74, 20, 16, 6); ctx.fill();
+    // cabelo
+    ctx.fillStyle = hair;
+    ctx.fillRect(10, o.h-76, 20, 8);
+    ctx.beginPath(); ctx.roundRect(8, o.h-72, 6, 14, 3); ctx.fill();
+    ctx.beginPath(); ctx.roundRect(26, o.h-72, 6, 14, 3); ctx.fill();
+    // olhos
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(14, o.h-68, 3, 2);
+    ctx.fillRect(23, o.h-68, 3, 2);
+
+    // braços
+    ctx.fillStyle = skin;
+    // esquerdo
+    ctx.beginPath(); ctx.roundRect(2, o.h-56, 6, 20, 3); ctx.fill();
+    // direito acenando
+    ctx.save();
+    ctx.translate(34, o.h-56);
+    ctx.rotate((-10 + wave) * Math.PI/180);
+    ctx.beginPath(); ctx.roundRect(-3, 0, 6, 20, 3); ctx.fill();
+    ctx.restore();
+
+    // pasta
+    ctx.fillStyle = '#38bdf8';
+    ctx.beginPath(); ctx.roundRect(0, o.h-48, 12, 12, 2); ctx.fill();
+
+    ctx.restore();
+  }
+
+  // --- AÉREOS (cores fixas) ---
+  function drawKeyboard(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) {
+      o.floatPhase += dt*0.006;
+      ctx.translate(0, Math.sin(o.floatPhase)*1.5);
+    }
+    ctx.fillStyle = '#374151';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, o.h, 3); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#9ca3af';
+    for (let x=4; x<o.w-4; x+=8) for (let y=3; y<o.h-3; y+=6) ctx.fillRect(x, y, 5, 3);
+    ctx.restore();
+  }
+
+  function drawMonitor(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) {
+      o.floatPhase += dt*0.0065;
+      ctx.translate(0, Math.sin(o.floatPhase)*1.8);
+    }
+    ctx.fillStyle = '#111827';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, o.h, 4); ctx.fill(); ctx.stroke();
+    const g = ctx.createLinearGradient(0,0,o.w,o.h);
+    g.addColorStop(0, '#1e3a8a');
+    g.addColorStop(1, '#3b82f6');
+    ctx.fillStyle = g; ctx.fillRect(4,4,o.w-8,o.h-10);
+    ctx.fillStyle = '#64748b';
+    ctx.fillRect(o.w/2-3, o.h-6, 6, 6);
+    ctx.restore();
+  }
+
+  function drawCoffee(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) {
+      o.floatPhase += dt*0.007;
+      ctx.translate(0, Math.sin(o.floatPhase)*2);
+    }
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 6, o.w, o.h-6, 4); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(o.w-2, o.h/2+4, 6, -Math.PI/2, Math.PI/2); ctx.stroke();
+    ctx.fillStyle = '#7f5539'; ctx.fillRect(2, 8, o.w-4, 6);
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    for (let i=0;i<2;i++){
+      const px = 6 + i*8;
+      const py = 4 + Math.sin((performance.now()/400)+(i*0.7))*2;
+      ctx.beginPath(); ctx.moveTo(px, py);
+      ctx.quadraticCurveTo(px+2, py-6, px, py-12); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawChocolate(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) {
+      o.floatPhase += dt*0.0068;
+      ctx.translate(0, Math.sin(o.floatPhase)*1.6);
+    }
+    ctx.fillStyle = '#6b3f2b';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, o.h, 3); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#8d5a3a';
+    const pad = 3, gw = 8, gh = 8;
+    for (let x=pad; x<o.w-pad; x+=gw+2){
+      for (let y=pad; y<o.h-pad; y+=gh+2){
+        if (y+gh < o.h - pad) { ctx.fillRect(x, y, gw, gh); }
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawCandy(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) {
+      o.floatPhase += dt*0.0072;
+      ctx.translate(0, Math.sin(o.floatPhase)*2.0);
+    }
+    const bodyW = o.w * 0.6;
+    const bodyH = o.h * 0.7;
+    const bx = (o.w - bodyW)/2;
+    const by = (o.h - bodyH)/2;
+    ctx.fillStyle = '#ec4899';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(bx, by, bodyW, bodyH, 6); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath(); ctx.moveTo(0, by+bodyH/2); ctx.lineTo(bx, by); ctx.lineTo(bx, by+bodyH); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(o.w, by+bodyH/2); ctx.lineTo(bx+bodyW, by); ctx.lineTo(bx+bodyW, by+bodyH); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.beginPath(); ctx.moveTo(bx+6, by+bodyH*0.3); ctx.lineTo(bx+bodyW-6, by+bodyH*0.3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(bx+6, by+bodyH*0.5); ctx.lineTo(bx+bodyW-6, by+bodyH*0.5); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawAgenda(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) { o.floatPhase += dt*0.0065; ctx.translate(0, Math.sin(o.floatPhase)*1.8); }
+    ctx.fillStyle = '#38bdf8';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, o.h, 5); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#334155';
+    for (let y=4; y<o.h-4; y+=6) { ctx.beginPath(); ctx.arc(4, y, 2, 0, Math.PI*2); ctx.fill(); }
+    ctx.fillStyle = '#ec4899';
+    ctx.fillRect(o.w-8, 4, 4, 10);
+    ctx.restore();
+  }
+
+  function drawCall(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) { o.floatPhase += dt*0.0062; ctx.translate(0, Math.sin(o.floatPhase)*1.5); }
+    const r = Math.min(o.w, o.h) * 0.6;
+    ctx.fillStyle = '#22c55e';
+    ctx.beginPath(); ctx.arc(o.w/2, o.h/2, r, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3; ctx.lineCap = 'round';
+    const cx = o.w/2, cy = o.h/2;
+    ctx.beginPath();
+    ctx.moveTo(cx-8, cy+4); ctx.quadraticCurveTo(cx-12, cy, cx-8, cy-6);
+    ctx.moveTo(cx+8, cy+4); ctx.quadraticCurveTo(cx+12, cy, cx+8, cy-6);
+    ctx.moveTo(cx-8, cy+4); ctx.lineTo(cx+8, cy+4);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawEmail(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) { o.floatPhase += dt*0.0068; ctx.translate(0, Math.sin(o.floatPhase)*1.6); }
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, o.h, 4); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = '#3b82f6';
+    ctx.beginPath();
+    ctx.moveTo(2, 2); ctx.lineTo(o.w/2, o.h/2+2); ctx.lineTo(o.w-2, 2);
+    ctx.moveTo(2, o.h-2); ctx.lineTo(o.w/2, o.h/2-2); ctx.lineTo(o.w-2, o.h-2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawBadge(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) { o.floatPhase += dt*0.0066; ctx.translate(0, Math.sin(o.floatPhase)*1.7); }
+    // cordão
+    ctx.strokeStyle = '#0ea5e9';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(o.w/2, -6);
+    ctx.quadraticCurveTo(o.w/2 - 8, 6, 6, 10);
+    ctx.moveTo(o.w/2, -6);
+    ctx.quadraticCurveTo(o.w/2 + 8, 6, o.w-6, 10);
+    ctx.stroke();
+    // cartão
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#1f2937';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(4, 12, o.w-8, o.h-16, 4); ctx.fill(); ctx.stroke();
+    // clipe
+    ctx.fillStyle = '#64748b'; ctx.fillRect(o.w/2 - 4, 8, 8, 6);
+    // "foto"
+    ctx.fillStyle = '#3b82f6'; ctx.beginPath(); ctx.arc(12, 26, 5, 0, Math.PI*2); ctx.fill();
+    // linhas
+    ctx.fillStyle = '#94a3b8'; ctx.fillRect(22, 22, o.w-30, 3); ctx.fillRect(22, 27, o.w-36, 3);
+    ctx.restore();
+  }
+
+  function drawWorkcard(o, dt){
+    ctx.save(); ctx.translate(o.x, o.y);
+    if (o.floatPhase !== undefined) { o.floatPhase += dt*0.0069; ctx.translate(0, Math.sin(o.floatPhase)*1.6); }
+    // capa
+    const cover = '#2563eb';
+    const border = '#1f2937';
+    ctx.fillStyle = cover;
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.roundRect(0, 0, o.w, o.h, 4); ctx.fill(); ctx.stroke();
+    // lombo
+    ctx.fillStyle = '#1d4ed8'; ctx.fillRect(2, 0, 4, o.h);
+    // emblema
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(o.w/2, o.h/2, Math.min(o.w,o.h)*0.25, 0, Math.PI*2); ctx.fill();
+    // linhas
+    ctx.fillStyle = '#e5e7eb';
+    ctx.fillRect(6, o.h-10, o.w-12, 2);
+    ctx.fillRect(10, o.h-14, o.w-20, 2);
+    ctx.restore();
+  }
+  // ======= FIM – Objetos com cores fixas =======
+
+  // Loop principal
+  function loop(ms) {
+    if (!running) return;
+    const dt = ms - (lastTime || ms);
+    lastTime = ms;
+
+    update(dt);
+    render(dt, ms);
+
+    if (running) requestAnimationFrame(loop);
+  }
+
+  function update(dt) {
+    if (gameOver) return;
+
+    // velocidade
+    speed = clamp(speed + ACCEL*dt, BASE_SPEED, MAX_SPEED);
+
+    // spawn
+    spawnTimer += dt;
+    if (spawnTimer > spawnInterval) {
+      spawnTimer = 0;
+      spawnObstacle();
+    }
+
+    // mover obstáculos
+    for (let i=obstacles.length-1;i>=0;i--){
+      const o = obstacles[i];
+      o.x -= speed;
+      // pontua quando passa da lhama
+      if (!o.scored && (o.x + o.w) < llama.x) {
+        o.scored = true;
+        score += o.value;
+        hiScore = Math.max(hiScore, score);
+        localStorage.setItem('llamaRunnerHiScore', hiScore);
+        popups.push({ x: o.x + o.w, y: o.y - 8, text: `+${o.value}`, life: 1.2 });
+      }
+      if (o.x + o.w < -30) obstacles.splice(i,1);
+    }
+
+    // física lhama
+    llama.vy += 0.6;
+    llama.y += llama.vy;
+    const targetH = llama.duck && llama.onGround ? 36 : 50;
+    llama.h += (targetH - llama.h) * 0.3;
+
+    if (llama.y + llama.h >= FLOOR_Y) {
+      llama.y = FLOOR_Y - llama.h;
+      llama.vy = 0;
+      llama.onGround = true;
+    } else {
+      llama.onGround = false;
+    }
+
+    // animação perna
+    if (llama.onGround) llama.legPhase += 0.2 + speed*0.02;
+
+    // colisão
+    const hitbox = { x: llama.x + 6, y: llama.y + 6, w: llama.w - 12, h: llama.h - 8 };
+    for (const o of obstacles) {
+      const hb = { x: o.x + 2, y: o.y + 2, w: o.w - 4, h: o.h - 4 };
+      if (collide(hitbox, hb)) {
+        llama.alive = false;
+        running = false;
+        gameOver = true;
+        break;
+      }
+    }
+
+    // atualizar popups
+    for (let i = popups.length - 1; i >= 0; i--) {
+      const p = popups[i];
+      p.life -= dt/1000;
+      p.y -= dt * 0.02;
+      if (p.life <= 0) popups.splice(i,1);
+    }
+  }
+
+  function render(dt, ms) {
+    clear();                   // parede interna (fixa)
+    drawExterior(dt);          // EXTERIOR (dia/noite/chuva)
+    drawOfficeInterior();      // piso interno (fixo)
+
+    // obstáculos
+    for (const o of obstacles) {
+      switch (o.type) {
+        case 'desk':        drawDesk(o); break;
+        case 'chair':       drawChair(o); break;
+        case 'switch':      drawSwitch(o); break;
+        case 'server':      drawServer(o); break;
+        case 'toilet':      drawToilet(o); break;
+        case 'watercooler': drawWatercooler(o); break;
+        case 'secretary':   drawSecretary(o); break;
+
+        case 'monitor':     drawMonitor(o, dt); break;
+        case 'coffee':      drawCoffee(o, dt); break;
+        case 'candy':       drawCandy(o, dt); break;
+        case 'agenda':      drawAgenda(o, dt); break;
+        case 'email':       drawEmail(o, dt); break;
+      }
+    }
+
+    // lhama
+    let state = 'run';
+    if (!llama.alive) state = 'dead';
+    else if (llama.duck && llama.onGround) state = 'duck';
+    drawLlama(llama.x, llama.y, state);
+
+    // HUD
+    drawScore();
+    drawPopups();
+
+    // Overlay das janelas (reflexos + streaks de chuva) em frente
+    drawWindowOverlay(ms);
+
+    if (gameOver) {
+      ctx.fillStyle = '#111827';
+      ctx.font = 'bold 28px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('GAME OVER', W/2, H/2 - 8);
+      ctx.font = '16px ui-monospace, monospace';
+      ctx.fillText('Pressione ESPAÇO para reiniciar', W/2, H/2 + 18);
+    }
+  }
+
+  function drawPopups() {
+    for (const p of popups) {
+      const alpha = Math.max(0, Math.min(1, p.life));
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = '#10b981';
+      ctx.font = 'bold 16px ui-monospace, monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(p.text, p.x, p.y);
+      ctx.restore();
+    }
+  }
+
+  // Start
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+<footer>• By @lhamasunited</footer>
+</html>

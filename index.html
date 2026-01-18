@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VPN BLOCK</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+  <!-- Popup de expiração -->
+  <div class="overlay" id="popup" role="dialog" aria-modal="true" aria-labelledby="popup-title"
+    aria-describedby="popup-desc">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 class="modal-title" id="popup-title">Aviso</h2>
+      </div>
+      <div class="modal-body" id="popup-desc">
+        <p><strong>SEU ACESSO EXPIROU!</strong></p>
+        <p>Por segurança, faça login novamente ou aguarde novas instruções.</p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="popup-ok" aria-label="Ok, entendido">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Layout principal -->
+  <main class="page" role="main">
+    <!-- Coluna esquerda: conteúdo -->
+    <section class="left">
+      <div class="left-header">
+        <a class="brand" href="#" aria-label="Página inicial">
+          <img src="assets/images/logo.png" alt="Logo" />
+          <!-- <span class="brand-text">Marca</span> -->
+        </a>
+      </div>
+
+      <div class="left-inner">
+        <div class="message" aria-live="polite">
+          <h1>Estamos quase lá.</h1>
+          <p>Por favor, aguarde enquanto concluímos as verificações.</p>
+
+          <!-- Barra de progresso (120s) -->
+          <div class="progress-wrap">
+            <div id="progressbar" class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+              aria-valuenow="0" aria-label="Progresso das verificações" data-total-seconds="120">
+              <span id="progress-fill" class="progress-fill" style="width:0%"></span>
+              <span id="progress-label" class="progress-label">0%</span>
+            </div>
+            <div class="progress-hint" id="progress-hint" aria-hidden="true">Tempo estimado: 120s</div>
+          </div>
+        </div>
+
+
+        <div class="actions">
+          <a class="btn" id="main-action" href="aguardando.html" target="_blank" rel="noopener noreferrer">
+            <span class="dot" aria-hidden="true"></span>
+            Aguardar
+          </a>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Coluna direita: imagem full -->
+    <section class="right" aria-label="Imagem ilustrativa">
+      <img src="assets/images/Designer (2).png" alt="Imagem ilustrativa" />
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+
+</html>
